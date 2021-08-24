@@ -1,0 +1,43 @@
+exports.PeatlandArea = PeatlandArea;
+
+Map.centerObject(PeatlandArea, 10);
+print(PeatlandArea.area());
+
+var PeatlandAreaCentre = PeatlandArea.centroid();
+print(PeatlandArea.centroid());
+
+Map.addLayer(PeatlandAreaCentre, {}, 'Centre');
+
+// CReate Feature Collection
+
+var PeatlandFeature = ee.FeatureCollection([
+  ee.Feature(ee.Geometry.Polygon(
+        [[[-3.418781, 58.222096],
+          [-3.391306, 58.243786],
+          [-3.366579, 58.258238],
+          [-3.286903, 58.27774],
+          [-3.209974, 58.292178],
+          [-3.182499, 58.303725],
+          [-3.144035, 58.330412],
+          [-3.089085, 58.368605],
+          [-3.043752, 58.425457],
+          [-3.009409, 58.447741],
+          [-3.027268, 58.488678],
+          [-3.053369, 58.49729],
+          [-3.09458, 58.492984],
+          [-3.113813, 58.501595],
+          [-3.112439, 58.520246],
+          [-3.237448, 58.543903],
+          [-3.663305, 58.478627],
+          [-3.641325, 58.379406],
+          [-3.574012, 58.279906],
+          [-3.503952, 58.231496],
+          [-3.45175, 58.219926],
+          [-3.418781, 58.222096]]]), {name: 'PeatlandArea'})]);
+
+// Export the FeatureCollection to a SHP file.
+Export.table.toDrive({
+  collection: PeatlandFeature,
+  description:'PeatlandAreaSHP3',
+  fileFormat: 'CSV'
+});
