@@ -1,0 +1,343 @@
+// - - - - - DEFINE AREA OF INTEREST AND DATE RANGES - - - - - //
+
+// Peatland Area
+var ROI = PeatlandArea;
+
+// Composite Dates
+var StartDate2020 = ('2020-01-01');
+var EndDate2020 = ('2020-12-31');
+
+// - - - - - CREATE YEARLY IMAGE COLLECTIONS - - - - //
+
+// Create Image Collection of Sentinel-2 Imagery, filtered by date and PeatlandArea
+var YearlyS2 = function(StartDate, EndDate) {
+  var S2 = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterDate(StartDate, EndDate)
+  .filterBounds(PeatlandArea);
+  return S2;
+};
+
+// - - - - - CLOUD MASKING FUNCTIONS - - - - - //
+
+// Function to mask cloud from built-in Quality Band (QA60)
+var maskcloud1 = function(image) {
+var QA60 = image.select(['QA60']);
+return image.updateMask(QA60.lt(1));
+};
+
+// Function to mask further cloud using B1 (Aerosol / Cirrus Cloud) threshold
+var maskcloud2 = function(image) {
+var B1 = image.select(['B1']);
+var bin = B1.gt(1500);
+return image.updateMask(bin.lt(1));
+};
+
+// - - - - - CREATE INDICES FUNCTION - - - - - //    
+
+// Function to calculate and add an spectral indices to Image Collection
+var addIndices = function(image) {
+  var NDVI = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  var NDBI = image.normalizedDifference(['B11', 'B8']).rename('NDBI');
+  var NDMI = image.normalizedDifference(['B8', 'B11']).rename('NDMI');
+  var mNDWI = image.normalizedDifference(['B3', 'B11']).rename('mNDWI'); 
+  var EVI = image.expression(
+      '2.5 * ((B8 - B4) / (B8 + 6 * B4 - 7.5 * B2 + 1))', {
+      'B8': image.select('B8'),
+      'B4': image.select('B4'),
+      'B2': image.select('B2')}).rename('EVI');
+  var OSAVI = image.expression(
+  '(1.16 * B8 - B4) / (B8 +B4 +0.16)', {
+    'B8': image.select('B8'), 
+    'B4': image.select('B4')}).rename('OSAVI');
+  return image.addBands(NDVI).addBands(NDBI).addBands(NDMI).addBands(mNDWI).addBands(EVI).addBands(OSAVI);
+};
+
+// - - - - - ADDING SENTINEL-1A DATA (SAR) - - - - - //
+
+// Load the Sentinel-1 ImageCollection
+var YearlyS1 = function (StartDate, EndDate) {
+  var S1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterDate(StartDate, EndDate)
+  .filterBounds(PeatlandArea);
+
+  // Filter the Sentinel-1 collection by metadata properties.
+  var VvVh = S1
+  // Filter to get images with VV and VH dual polarization.
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  // Filter to get images collected in interferometric wide swath mode.
+  .filter(ee.Filter.eq('instrumentMode', 'IW'));
+  
+  return VvVh;
+};
+
+// Create Polarization Difference Function
+var addPol = function (image) {
+ var NormPol = image.expression(
+  '(VH-VV) / (VH+VV)', {
+    'VV': image.select('VV'), 
+    'VH': image.select('VH')}).rename('NormPol');
+ var PolDiff = image.expression(
+  '(VV-VH)', {
+    'VV': image.select('VV'), 
+    'VH': image.select('VH')}).rename('PolDiff');
+return image.addBands(NormPol).addBands(PolDiff);
+};
+
+// - - - - - ADDING TOPOGRAPHIC DATA - - - - - //
+
+// Load the NASADEM image
+
+var NASADEM = ee.Image("NASA/NASADEM_HGT/001");
+var NASADEM = ee.Terrain.products(NASADEM);
+var NASADEM = NASADEM.select(['elevation','slope','aspect']);
+
+// Import NASADEM Topographic Indices (TWI and TPI)
+var TWI = ee.Image("users/neilsutherland/TWI_TheLongWay").select('b1').rename('TWI');
+var TPI = ee.Image("users/neilsutherland/TPI_SAGA_GeoTIFF").select('b1').rename('TPI');
+var NASADEM = NASADEM.addBands(TWI).addBands(TPI);
+
+// - - - - - COMPOSITE - - - - - //
+
+// Create Sentinel-2 Composite
+var Sent2_2020 = YearlyS2(StartDate2020, EndDate2020).map(maskcloud1).map(maskcloud2).map(addIndices);
+var CompositeSent2_2020 = Sent2_2020.median();
+
+// Create Sentinel-1 Composite
+var Sent1_2020 = YearlyS1(StartDate2020,EndDate2020).map(addPol);
+var CompositeSent1_2020 = Sent1_2020.mean();
+
+// Merge Composites
+var Composite2020 = CompositeSent2_2020.addBands(CompositeSent1_2020);
+var Composite2020 = Composite2020.addBands(NASADEM);
+print('Optical, Radar & Topographic 2020 Composite:', Composite2020);
+
+// Visualisation Parameters
+var S2ATrueColour = {bands: ['B4', 'B3', 'B2'], min: -65, max: 1300, gamma: 0.8 };
+
+// Add Composite to Map
+Map.centerObject(PeatlandArea, 10);
+Map.addLayer(Composite2020.clip(PeatlandArea), S2ATrueColour, 'Composite 2020');
+
+// - - - - - CREATE FEATURE COLLECTION FOR TRAINING DATA - - - - - //
+
+// Define a function to add a class column to each Training Data Feature Collection
+var TrainingDataClassAssignment = function (TrainingDataFC, ClassNumber) {
+  var TrainingDataClassed = TrainingDataFC.map(function(feature) {
+    feature = feature.set('class', ClassNumber);
+    return feature;
+  });
+  return TrainingDataClassed;
+};
+
+var MarineTrainingData = ee.FeatureCollection("users/neilsutherland/TrainingData/MarineTrainingData");
+var MarineTrainingData = TrainingDataClassAssignment(MarineTrainingData, 0);
+//print('Marine Training Data Function:', MarineTrainingData);
+
+var EnclosedFarmlandTrainingData = ee.FeatureCollection("users/neilsutherland/TrainingData/EnclosedFarmlandTrainingData");
+var EnclosedFarmlandTrainingData = TrainingDataClassAssignment(EnclosedFarmlandTrainingData, 1);
+//print('Enclosed Farmland Training Data Function:', EnclosedFarmlandTrainingData);
+
+var ForestryImprovedTrainingData = ee.FeatureCollection("users/neilsutherland/TrainingData/ForestryImprovedTrainingData");
+var ForestryImprovedTrainingData = TrainingDataClassAssignment(ForestryImprovedTrainingData, 2);
+//print('Forestry Training Data Function:', ForestryImprovedTrainingData);
+
+var PeatlandImprovedTrainingData = ee.FeatureCollection("users/neilsutherland/TrainingData/PeatlandImprovedTrainingData");
+var PeatlandImprovedTrainingData = TrainingDataClassAssignment(PeatlandImprovedTrainingData, 3);
+//print('Peatland Training Data Function:', PeatlandImprovedTrainingData);
+
+var RandWImprovedTrainingData = ee.FeatureCollection("users/neilsutherland/TrainingData/RandWImprovedTrainingData");
+var RandWImprovedTrainingData = TrainingDataClassAssignment(RandWImprovedTrainingData, 4);
+//print('Rivers and Waterbodies Training Data Function:', RandWImprovedTrainingData);
+
+var SemiNaturalTrainingData = ee.FeatureCollection("users/neilsutherland/TrainingData/SemiNaturalTrainingData");
+var SemiNaturalTrainingData = TrainingDataClassAssignment(SemiNaturalTrainingData, 5);
+//print('Semi-Natural Training Data Function:', SemiNaturalTrainingData);
+
+var SettlementsTrainingData = ee.FeatureCollection("users/neilsutherland/TrainingData/SettlementsTrainingData");
+var SettlementsTrainingData = TrainingDataClassAssignment(SettlementsTrainingData, 6);
+//print('Semi-Natural Training Data Function:', SettlementsTrainingData);
+
+var CoastalTrainingData = ee.FeatureCollection("users/neilsutherland/TrainingData/CoastalTrainingData");
+var CoastalTrainingData = TrainingDataClassAssignment(CoastalTrainingData, 7);
+//print('Coastal Training Data Function:', CoastalTrainingData);
+
+var TrainingFC = CoastalTrainingData  // Class (7)
+.merge(MarineTrainingData)            // Class (0)
+.merge(EnclosedFarmlandTrainingData)  // Class (1)
+.merge(ForestryImprovedTrainingData)  // Class (2)
+.merge(PeatlandImprovedTrainingData)  // Class (3)
+.merge(RandWImprovedTrainingData)     // Class (4)
+.merge(SemiNaturalTrainingData)       // Class (5)
+.merge(SettlementsTrainingData);      // Class (6)
+
+print('Training Feature Collection:', TrainingFC);
+
+// - - - - - RANDOM FOREST CLASSIFICATION - - - - - //
+
+// Select the bands for training
+var bands = [ 
+  'B2','B3','B4','B5','B6','B7','B8','B8A','B9','B11','B12',  // Spectral Bands
+  'NDVI','NDBI','NDMI','mNDWI','EVI','OSAVI',                 // Spectral Indices
+  'elevation','TWI','TPI','aspect','slope',                 // Topographic 
+  'VV','VH','NormPol','PolDiff'                               // SAR 
+];
+
+// Add a random Column to split Training/Validation
+var random = TrainingFC.randomColumn();
+
+// Create Training and Test Data
+var trainingData = random.filter(ee.Filter.lt('random', 0.7));
+var validationData = random.filter(ee.Filter.gte('random', 0.7));
+
+// Sample the input imagery to get a FeatureCollection of training data.
+var training = Composite2020.select(bands).sampleRegions({
+  collection: trainingData,
+  properties: ['class'],
+  scale:30,
+  tileScale:2
+});
+
+// Make a Random Forest classifier and train it.
+var classifier = ee.Classifier.smileRandomForest(350)
+  .train({
+  features: training,
+  classProperty: 'class',
+  inputProperties: bands
+});
+
+// Classify the input imagery.
+var classified = Composite2020.select(bands).classify(classifier);
+
+// Sample the input imagery to get a FeatureCollection of validation data.
+var test = classified.sampleRegions({
+  collection: validationData,
+  properties: ['class'],
+  scale:30,
+  tileScale:2
+});
+
+// Variable Importance
+var exp = classifier.explain();
+print('RF explained', exp);
+
+var importance = ee.Dictionary(exp.get('importance'));
+var keys = importance.keys().sort(importance.values()).reverse();
+var values = importance.values(keys);
+var rows = keys.zip(values).map(function(list) {
+  return {c: ee.List(list).map(function(n) { return {v: n}; })};
+});
+
+var dataTable = {
+  cols: [{id: 'band', label: 'Band', type: 'string'},
+         {id: 'importance', label: 'Importance', type: 'number'}],
+  rows: rows
+};
+
+ee.Dictionary(dataTable).evaluate(function(result) {
+  var chart = ui.Chart(result)
+    .setChartType('ColumnChart')
+    .setOptions({
+      title: 'Random Forest Band Importance',
+      legend: {position: 'none'},
+      hAxis: {title: 'Bands'},
+      vAxis: {title: 'Importance'}
+    });
+  print(chart);
+});
+
+// Tune the numberOfTrees parameter.
+var numTreesList = ee.List.sequence(50, 700, 50);
+
+var accuracies = numTreesList.map(function(numTrees) {
+  var classifier = ee.Classifier.smileRandomForest(numTrees)
+      .train({
+        features: training,
+        classProperty: 'class',
+        inputProperties: bands
+      });
+  
+  // Sample the input imagery to get a FeatureCollection of validation data.
+  var test1 = Composite2020.select(bands).sampleRegions({
+    collection: validationData,
+    properties: ['class'],
+    scale:30,
+    tileScale:2
+  });
+  // Here we are classifying a table instead of an image
+  // Classifiers work on both images and tables
+  return test1
+    .classify(classifier)
+    .errorMatrix('class', 'classification')
+    .accuracy();
+});
+
+print('Accuracies:', accuracies);
+
+var chart = ui.Chart.array.values({
+  array: ee.Array(accuracies),
+  axis: 0,
+  xLabels: numTreesList
+  }).setOptions({
+      title: 'Hyperparameter Tuning for the numberOfTrees Parameters',
+      vAxis: {title: 'Validation Accuracy'},
+      hAxis: {title: 'Number of Tress', gridlines: {count: 15}}
+  });
+print(chart);
+
+// Define a palette for the Land Use classification.
+var PeatlandPalette = [
+  '185783', //  Marine              (0) //  Dark Grey
+  '9DC877', //  Enclosed Farmland   (1) //  Blue
+  '165014', //  Forestry            (2) //  Dark Green
+  '735A49', //  Peatland            (3) //  Purple
+  'B0DBDE', //  Inland Water        (4) //  Light Blue
+  '919525', //  Semi-Natural        (5) //  Yellow
+  'BEBEBE', //  Settlements         (6) // Terracotta
+  '4F494F', //  Coastal             (7) // Light Grey
+];
+
+// Display the classification result and the input image.
+Map.centerObject(PeatlandArea,12);
+Map.addLayer(classified.clip(PeatlandArea), {min:0, max: 7, palette: PeatlandPalette}, 'Land Use Classification');
+
+// - - - - - VALIDATION AND ACCURACY ASSESSMENT - - - - - //
+
+var TestErrorMatrix = test.errorMatrix('class', 'classification');
+print('Confusion Matrix:',TestErrorMatrix);
+print('Overall Accuracy:', TestErrorMatrix.accuracy());
+print('Kappa:', TestErrorMatrix.kappa());
+print('Consumers Accuracy:', TestErrorMatrix.consumersAccuracy());
+print('Producers Accuracy:', TestErrorMatrix.producersAccuracy());
+
+/*
+
+// - - - - - POST PROCESSING CLEANING - - - - - //
+
+// Post process by replacing isolated pixels with surrounding value
+// count patch sizes
+var patchsize = classified.connectedPixelCount(250, true);
+// run a majority filter
+var filtered = classified.focal_mode({
+    radius: 750,
+    kernelType: 'circle',
+    units: 'meters',
+}); 
+// updated image with majority filter where patch size is small
+var connectedClassified =  classified.where(patchsize.lt(25),filtered);
+Map.addLayer(connectedClassified.clip(PeatlandArea), {min: 0, max: 7, palette: PeatlandPalette}, 'Processed using Connected Pixels');
+
+// - - - - - EXPORT IMAGES IN GEOTIFF - - - - - //
+
+// Land USe Classification
+//Export.image.toDrive({
+//  image: classified,
+//  description: 'Land Use Classification',
+//  scale: 30,
+//  maxPixels: 1e10,
+//  region: PeatlandArea,
+//  crs: 'EPSG:27700'
+//});
+
+
+*/
